@@ -157,25 +157,59 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def write_config_yaml(data: dict[str, str]) -> None:
-    """Write a minimal config.yaml so hermes picks up the model and provider."""
+    """Write config.yaml — deep-merge template defaults with any existing user/cron-managed sections.
+
+    Previously this overwrote ``$HERMES_HOME/config.yaml`` with a hardcoded template
+    body on every boot, silently erasing user-managed top-level keys. The most
+    common casualty is ``mcp_servers`` — Hermes reads downstream MCP servers
+    *only* from this file (see ``hermes_cli/mcp_config.py:_get_mcp_servers``), so
+    the wipe broke ``hermes mcp add/test/list`` state across every container
+    restart and required hand-restoration after each redeploy.
+
+    The fix: load the existing file if any, apply the deployment-managed keys
+    (``model.default``, ``model.provider``, ``terminal``, ``agent``, ``data_dir``)
+    on top, and write the merged result. Unknown top-level keys (``mcp_servers``,
+    custom skill config, etc.) are preserved verbatim.
+    """
+    import yaml  # hermes-agent already pulls pyyaml; deferred import keeps cold start light
+
     model = data.get("LLM_MODEL", "")
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(f"""\
-model:
-  default: "{model}"
-  provider: "auto"
 
-terminal:
-  backend: "local"
-  timeout: 60
-  cwd: "/tmp"
+    existing: dict = {}
+    if config_path.exists():
+        try:
+            with config_path.open() as f:
+                loaded = yaml.safe_load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (yaml.YAMLError, OSError):
+            # Treat unparseable as absent — we'll overwrite with template defaults.
+            existing = {}
 
-agent:
-  max_iterations: 50
+    merged = dict(existing)
 
-data_dir: "{HERMES_HOME}"
-""")
+    # Deployment-managed (always authoritative — these reflect the runtime env).
+    merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
+    merged_model["default"] = model
+    merged_model["provider"] = "auto"
+    merged["model"] = merged_model
+
+    merged_terminal = dict(merged.get("terminal") if isinstance(merged.get("terminal"), dict) else {})
+    merged_terminal["backend"] = "local"
+    merged_terminal["timeout"] = 60
+    merged_terminal["cwd"] = "/tmp"
+    merged["terminal"] = merged_terminal
+
+    merged_agent = dict(merged.get("agent") if isinstance(merged.get("agent"), dict) else {})
+    merged_agent.setdefault("max_iterations", 50)
+    merged["agent"] = merged_agent
+
+    merged["data_dir"] = HERMES_HOME
+
+    with config_path.open("w") as f:
+        yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
 
 
 def write_env(path: Path, data: dict[str, str]) -> None:
