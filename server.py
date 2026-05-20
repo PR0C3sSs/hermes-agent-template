@@ -97,6 +97,13 @@ ENV_VARS = [
     ("AI_GATEWAY_API_KEY",       "Vercel AI Gateway",        "provider",  True),
     ("GEMINI_API_KEY",           "Google AI Studio",         "provider",  True),
     ("NOVITA_API_KEY",           "NovitaAI",                 "provider",  True),
+    ("FIREWORKS_API_KEY",        "Fireworks AI",             "provider",  True),
+    # Custom OpenAI-compatible endpoint — one slot; more via Hermes dashboard.
+    # Only the API key is in category "provider" so PROVIDER_KEYS / is_config_complete
+    # only trigger when an actual key is present, not just a base URL.
+    ("CUSTOM_PROVIDER_API_KEY",  "Custom Provider key",      "provider",  True),
+    ("CUSTOM_PROVIDER_BASE_URL", "Custom Provider base URL", "custom",    False),
+    ("CUSTOM_PROVIDER_NAME",     "Custom Provider name",     "custom",    False),
     ("PARALLEL_API_KEY",         "Parallel (search)",        "tool",      True),
     ("FIRECRAWL_API_KEY",        "Firecrawl (scrape)",       "tool",      True),
     ("TAVILY_API_KEY",           "Tavily (search)",          "tool",      True),
@@ -213,6 +220,21 @@ def write_config_yaml(data: dict[str, str]) -> None:
     merged["agent"] = merged_agent
 
     merged["data_dir"] = HERMES_HOME
+
+    # Custom OpenAI-compatible endpoint — write custom_providers block when configured,
+    # remove it when not (safe on Railway where users don't hand-edit config.yaml).
+    custom_base_url = data.get("CUSTOM_PROVIDER_BASE_URL", "").strip()
+    if custom_base_url:
+        raw_name = data.get("CUSTOM_PROVIDER_NAME", "").strip() or custom_base_url
+        # Sanitise to a valid hermes provider name (lowercase alphanumeric + hyphens).
+        sanitized_name = re.sub(r"[^a-z0-9-]", "-", raw_name.lower()).strip("-") or "custom"
+        merged["custom_providers"] = [{
+            "name": sanitized_name,
+            "base_url": custom_base_url,
+            "key_env": "CUSTOM_PROVIDER_API_KEY",
+        }]
+    else:
+        merged.pop("custom_providers", None)
 
     with config_path.open("w") as f:
         yaml.safe_dump(merged, f, sort_keys=False, default_flow_style=False)
