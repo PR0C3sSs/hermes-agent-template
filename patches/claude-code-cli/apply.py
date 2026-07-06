@@ -84,7 +84,7 @@ def update_config() -> None:
     model_name = (
         os.environ.get("CLAUDE_CODE_CLI_MODEL", "").strip()
         or os.environ.get("LLM_MODEL", "").strip()
-        or "claude-sonnet-4-6"
+        or "claude-opus-4-8"
     )
     provider = os.environ.get("LLM_PROVIDER", "claude-code-cli").strip() or "claude-code-cli"
 
