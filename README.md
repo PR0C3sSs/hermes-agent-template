@@ -70,8 +70,27 @@ Message your Telegram bot. If you're a new user, a pairing request will appear i
 | `CLAUDE_CODE_VERSION` | `2.1.201` | Claude Code CLI version baked into the image for the `claude-code-cli` provider. |
 | `LLM_PROVIDER` | *(empty)* | Optional explicit Hermes provider override, e.g. `claude-code-cli`. |
 | `HERMES_CLAUDE_CODE_COMMAND` | `/usr/bin/claude` | Path used by Hermes's Claude Code CLI provider. |
+| `TS_AUTHKEY` | *(empty)* | Tailscale auth key. When set, the container joins your tailnet at boot and publishes the native Hermes dashboard over HTTPS so Hermes Desktop can reach it privately. Leave unset to keep the public `$PORT`-only behavior. Use a [reusable auth key](https://login.tailscale.com/admin/settings/keys) (ephemeral optional). |
+| `TS_HOSTNAME` | `hermes-railway` | Tailscale node name. The dashboard is reachable at `https://<TS_HOSTNAME>.<your-tailnet>.ts.net`. |
 
 All other configuration (LLM provider, model, channels, tools) is managed through the admin dashboard.
+
+### Private access via Tailscale (optional)
+
+By default the admin dashboard and Hermes dashboard are reached over the public
+Railway URL on `$PORT`. To reach the **native Hermes dashboard** (used by Hermes
+Desktop) privately instead of exposing it publicly, join the container to your
+[Tailscale](https://tailscale.com) tailnet:
+
+1. In the [Tailscale admin console](https://login.tailscale.com/admin/settings/keys), create a **reusable** auth key.
+2. Enable **MagicDNS** and **HTTPS certificates** for your tailnet (Settings → DNS).
+3. In Railway, set `TS_AUTHKEY` (and optionally `TS_HOSTNAME`), then redeploy.
+4. Point Hermes Desktop at `https://<TS_HOSTNAME>.<your-tailnet>.ts.net`.
+
+Railway containers have no `/dev/net/tun` and no `NET_ADMIN`, so `tailscaled`
+runs in **userspace-networking** mode. Node state is stored on the `/data`
+volume, so redeploys reuse the same tailnet node. If `TS_AUTHKEY` is unset the
+whole block is skipped and startup is unchanged.
 
 ## Supported Providers
 

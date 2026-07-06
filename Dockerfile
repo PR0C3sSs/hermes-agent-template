@@ -38,6 +38,19 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && \
     fi && \
     claude --version
 
+# Tailscale (userspace networking). Lets Hermes Desktop reach the native
+# dashboard on 127.0.0.1:9119 over a private tailnet instead of the public
+# $PORT admin proxy. Railway containers have no /dev/net/tun and no NET_ADMIN,
+# so tailscaled must run in userspace-networking mode (see start.sh). The
+# binaries are baked here; joining the tailnet is gated on TS_AUTHKEY at boot.
+ARG TAILSCALE_VERSION=1.98.8
+RUN curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" -o /tmp/tailscale.tgz && \
+    tar -xzf /tmp/tailscale.tgz -C /tmp && \
+    mv /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscale  /usr/bin/tailscale && \
+    mv /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscaled /usr/bin/tailscaled && \
+    rm -rf /tmp/tailscale.tgz /tmp/tailscale_${TAILSCALE_VERSION}_amd64 && \
+    tailscale version
+
 # Install hermes-agent (provides the `hermes` CLI) and pre-build its React
 # dashboard so `hermes dashboard` has nothing to build at runtime.
 #
