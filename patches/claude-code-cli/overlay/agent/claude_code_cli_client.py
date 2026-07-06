@@ -9,6 +9,7 @@ underlying execution mirrors OpenClaw's Claude CLI backend: ``claude -p`` with
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -16,11 +17,14 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 from agent.redact import redact_sensitive_text
 
@@ -142,7 +146,139 @@ def _build_subprocess_env() -> dict[str, str]:
     return env
 
 
-def _render_message_content(content: Any) -> str:
+_IMAGE_STAGING_SUBDIR = "hermes-claude-code-cli-images"
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _guess_image_ext(media_type: str | None, fallback: str = ".png") -> str:
+    mapping = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+        "image/webp": ".webp",
+        "image/gif": ".gif",
+    }
+    if isinstance(media_type, str) and media_type.lower() in mapping:
+        return mapping[media_type.lower()]
+    return fallback
+
+
+def _stage_image_source(source: str, staging_dir: Path) -> str | None:
+    """Resolve an OpenAI ``image_url`` source to a local file path.
+
+    Mirrors OpenClaw's Claude CLI backend: instead of embedding base64 in the
+    prompt, materialize the image as a local file and let Claude Code attach it
+    through an ``@path`` mention.
+
+    - Local paths (``/...``, ``~/...``, ``file://``) are used in place.
+    - ``data:`` URLs are decoded to a file under ``staging_dir``.
+    - ``http(s)://`` URLs are downloaded to ``staging_dir``.
+
+    Returns an absolute path, or ``None`` when it cannot be resolved.
+    """
+    if not isinstance(source, str) or not source.strip():
+        return None
+    source = source.strip()
+
+    if source.startswith("file://"):
+        source = source[len("file://"):]
+
+    if source.startswith("/") or source.startswith("~"):
+        p = Path(os.path.expanduser(source))
+        try:
+            return str(p.resolve()) if p.is_file() else None
+        except OSError:
+            return None
+
+    if source.startswith("data:"):
+        try:
+            header, b64data = source.split(",", 1)
+            media_type = None
+            if header.startswith("data:") and ";" in header:
+                media_type = header[len("data:"):header.index(";")]
+            ext = _guess_image_ext(media_type)
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(suffix=ext, dir=str(staging_dir))
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(base64.b64decode(b64data))
+            return tmp
+        except Exception:
+            return None
+
+    if source.startswith("http://") or source.startswith("https://"):
+        try:
+            ext = os.path.splitext(urlparse(source).path)[1].lower()
+            if ext not in _IMAGE_EXTS:
+                ext = ".png"
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(suffix=ext, dir=str(staging_dir))
+            req = urllib.request.Request(
+                source, headers={"User-Agent": "hermes-claude-code-cli"}
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read()
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            return tmp
+        except Exception:
+            return None
+
+    return None
+
+
+def _stage_image_item(
+    item: dict[str, Any],
+    image_paths: list[str] | None,
+    staging_dir: Path | None,
+) -> str | None:
+    if image_paths is None or staging_dir is None:
+        return None
+    url = item.get("image_url")
+    source = url.get("url") if isinstance(url, dict) else url
+    if not isinstance(source, str):
+        return None
+    staged = _stage_image_source(source, staging_dir)
+    if staged:
+        image_paths.append(staged)
+    return staged
+
+
+def _image_dirs(image_paths: list[str]) -> list[str]:
+    """Unique parent directories of staged/local images, for ``--add-dir``."""
+    dirs: list[str] = []
+    seen: set[str] = set()
+    for p in image_paths:
+        d = os.path.dirname(p)
+        if d and d not in seen:
+            seen.add(d)
+            dirs.append(d)
+    return dirs
+
+
+def _cleanup_staged_images(image_paths: list[str], staging_dir: Path) -> None:
+    """Delete only the temp files we created under ``staging_dir``.
+
+    Local images referenced in place (e.g. Hermes' image_cache) are never
+    touched — only files materialized from data:/http sources are removed.
+    """
+    try:
+        base = str(staging_dir.resolve())
+    except OSError:
+        base = str(staging_dir)
+    for p in image_paths:
+        try:
+            if os.path.commonpath([os.path.abspath(p), base]) == base:
+                os.unlink(p)
+        except Exception:
+            pass
+
+
+def _render_message_content(
+    content: Any,
+    *,
+    image_paths: list[str] | None = None,
+    staging_dir: Path | None = None,
+) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
@@ -163,7 +299,16 @@ def _render_message_content(content: Any) -> str:
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
                 elif item.get("type") == "image_url":
-                    parts.append("[image input omitted for Claude Code CLI provider]")
+                    staged = _stage_image_item(item, image_paths, staging_dir)
+                    if staged:
+                        # OpenClaw-style: reference the local file with an
+                        # @path mention so Claude Code attaches it as native
+                        # image input.  The mention resolves at input-parse
+                        # time, so Hermes keeps exclusive tool dispatch and the
+                        # Read/Grep/Glob denylist still applies.
+                        parts.append(f"@{staged}")
+                    else:
+                        parts.append("[image input omitted for Claude Code CLI provider]")
                 else:
                     parts.append(json.dumps(item, ensure_ascii=False))
         return "\n".join(p for p in parts if p).strip()
@@ -201,6 +346,8 @@ def _format_messages_as_prompt(
     model: str | None = None,
     tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
+    image_paths: list[str] | None = None,
+    staging_dir: Path | None = None,
 ) -> str:
     sections: list[str] = [
         "You are Claude Code CLI being used as Hermes Agent's active model provider.",
@@ -231,7 +378,11 @@ def _format_messages_as_prompt(
             "tool": "Tool result",
         }.get(role, role.title())
 
-        rendered = _render_message_content(message.get("content"))
+        rendered = _render_message_content(
+            message.get("content"),
+            image_paths=image_paths,
+            staging_dir=staging_dir,
+        )
         if role == "assistant" and message.get("tool_calls"):
             try:
                 rendered_calls = json.dumps(message.get("tool_calls"), ensure_ascii=False)
@@ -504,15 +655,26 @@ class ClaudeCodeCLIClient:
         stream: bool = False,
         **_: Any,
     ) -> Any:
+        image_paths: list[str] = []
+        staging_dir = Path(tempfile.gettempdir()) / _IMAGE_STAGING_SUBDIR
         prompt = _format_messages_as_prompt(
-            messages or [], model=model, tools=tools, tool_choice=tool_choice
+            messages or [],
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+            image_paths=image_paths,
+            staging_dir=staging_dir,
         )
         effective_timeout = self._coerce_timeout(timeout if timeout is not None else self._timeout)
-        response_text, reasoning_text, usage, actual_model = self._run_prompt(
-            prompt,
-            model=model,
-            timeout_seconds=effective_timeout,
-        )
+        try:
+            response_text, reasoning_text, usage, actual_model = self._run_prompt(
+                prompt,
+                model=model,
+                timeout_seconds=effective_timeout,
+                image_dirs=_image_dirs(image_paths),
+            )
+        finally:
+            _cleanup_staged_images(image_paths, staging_dir)
         tool_calls, cleaned_text = _extract_tool_calls_from_text(response_text)
         if stream:
             return self._stream_chunks(
@@ -543,7 +705,9 @@ class ClaudeCodeCLIClient:
         numeric = [float(v) for v in candidates if isinstance(v, (int, float))]
         return max(numeric) if numeric else _DEFAULT_TIMEOUT_SECONDS
 
-    def _command_for_model(self, model: str | None) -> list[str]:
+    def _command_for_model(
+        self, model: str | None, *, image_dirs: list[str] | None = None
+    ) -> list[str]:
         args = list(self._args)
         if not _has_flag(args, "-p", "--print"):
             args.insert(0, "-p")
@@ -557,6 +721,12 @@ class ClaudeCodeCLIClient:
             args.extend(["--setting-sources", "user"])
         if not _has_flag(args, "--disallowedTools", "--disallowed-tools"):
             args.extend(["--disallowedTools", ",".join(_DEFAULT_DISALLOWED_TOOLS)])
+        # Grant read access to directories holding @-mentioned image files so
+        # Claude Code can attach them as native image input.  This does not
+        # re-enable any tools — the mention resolves at input-parse time and
+        # the Read/Grep/Glob denylist still applies.
+        for d in image_dirs or []:
+            args.extend(["--add-dir", d])
         if not _has_flag(args, "--model") and not _is_model_placeholder(model):
             args.extend(["--model", str(model)])
         return [self._command] + args
@@ -567,8 +737,9 @@ class ClaudeCodeCLIClient:
         *,
         model: str | None,
         timeout_seconds: float,
+        image_dirs: list[str] | None = None,
     ) -> tuple[str, str, SimpleNamespace, str | None]:
-        cmd = self._command_for_model(model)
+        cmd = self._command_for_model(model, image_dirs=image_dirs)
         resolved = shutil.which(cmd[0]) if cmd and cmd[0] else None
         if not resolved:
             raise RuntimeError(
