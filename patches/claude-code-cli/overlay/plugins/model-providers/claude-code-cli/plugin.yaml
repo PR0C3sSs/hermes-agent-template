@@ -1,0 +1,5 @@
+name: claude-code-cli-provider
+kind: model-provider
+version: 1.0.0
+description: Claude Code via local `claude -p` subprocess
+author: Nous Research
