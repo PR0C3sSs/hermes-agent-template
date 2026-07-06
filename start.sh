@@ -48,4 +48,46 @@ fi
 # container), so removing the file unconditionally is safe.
 rm -f /data/.hermes/gateway.pid
 
+# ── Tailscale (userspace networking) ─────────────────────────────────────────
+# Railway containers have no /dev/net/tun and no NET_ADMIN capability, so
+# tailscaled runs in userspace-networking mode (no kernel TUN device). When
+# TS_AUTHKEY is set, join the tailnet and publish the native Hermes dashboard
+# (127.0.0.1:9119) over HTTPS so Hermes Desktop can reach
+# https://<hostname>.<tailnet>.ts.net without exposing the dashboard publicly.
+#
+# Node identity/state lives on the persistent /data volume so redeploys reuse
+# the same tailnet node instead of registering a new one each boot.
+#
+# The whole block is best-effort: any tailscale failure logs and continues so
+# it can never block `hermes gateway` from starting. Skipped entirely when
+# TS_AUTHKEY is unset, preserving the previous public-only behavior.
+if [ -n "${TS_AUTHKEY}" ]; then
+  mkdir -p /run/tailscale /data/.hermes/tailscale
+  TS_HOSTNAME="${TS_HOSTNAME:-hermes-railway}"
+
+  tailscaled \
+    --tun=userspace-networking \
+    --socket=/run/tailscale/tailscaled.sock \
+    --statedir=/data/.hermes/tailscale \
+    >/data/.hermes/logs/tailscaled.log 2>&1 &
+
+  # Wait for the daemon socket before `up` (bounded — never hang the boot).
+  for _i in $(seq 1 30); do
+    [ -S /run/tailscale/tailscaled.sock ] && break
+    sleep 0.5
+  done
+
+  tailscale up \
+    --authkey="${TS_AUTHKEY}" \
+    --hostname="${TS_HOSTNAME}" \
+    || echo "[tailscale] up failed — continuing without tailnet"
+
+  # Publish the native Hermes dashboard over HTTPS on the tailnet. Requires
+  # MagicDNS + HTTPS certs enabled in the tailnet admin console.
+  tailscale serve --bg --https=443 http://127.0.0.1:9119 \
+    || echo "[tailscale] serve failed — dashboard not published to tailnet"
+else
+  echo "[tailscale] TS_AUTHKEY not set — skipping tailnet setup"
+fi
+
 exec python /app/server.py
