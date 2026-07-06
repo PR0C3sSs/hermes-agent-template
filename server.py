@@ -87,6 +87,10 @@ else:
 # (key, label, category, is_secret)
 ENV_VARS = [
     ("LLM_MODEL",               "Model",                    "model",     False),
+    ("LLM_PROVIDER",            "Provider",                 "model",     False),
+    ("CLAUDE_CODE_CLI_MODEL",   "Claude Code model",        "model",     False),
+    ("HERMES_CLAUDE_CODE_COMMAND", "Claude Code CLI path",  "model",     False),
+    ("HERMES_CLAUDE_CODE_CLI_ENABLE", "Enable Claude Code CLI", "model", False),
     ("OPENROUTER_API_KEY",       "OpenRouter",               "provider",  True),
     ("DEEPSEEK_API_KEY",         "DeepSeek",                 "provider",  True),
     ("DASHSCOPE_API_KEY",        "Qwen Cloud (DashScope)",   "provider",  True),
@@ -201,6 +205,7 @@ def write_config_yaml(data: dict[str, str]) -> None:
     import yaml  # hermes-agent already pulls pyyaml; deferred import keeps cold start light
 
     model = data.get("LLM_MODEL", "")
+    provider = data.get("LLM_PROVIDER", "").strip()
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -220,11 +225,24 @@ def write_config_yaml(data: dict[str, str]) -> None:
     # Deployment-managed (always authoritative — these reflect the runtime env).
     merged_model = dict(merged.get("model") if isinstance(merged.get("model"), dict) else {})
     merged_model["default"] = model
+    if provider:
+        merged_model["provider"] = provider
+        if provider == "claude-code-cli":
+            # The Claude Code provider is a local subprocess-backed provider,
+            # not a normal HTTP API. These marker values tell Hermes to build
+            # the Claude Code CLI client instead of an OpenAI SDK client.
+            merged_model["base_url"] = "claude-code-cli://claude"
+            merged_model["api_mode"] = "chat_completions"
+        elif merged_model.get("base_url") == "claude-code-cli://claude":
+            # Avoid carrying the marker over if the Railway env switches away
+            # from Claude Code later.
+            merged_model.pop("base_url", None)
+            merged_model.pop("api_mode", None)
     # Only force provider="auto" when a known API key is configured. If no
     # API key is set, the user likely configured an OAuth provider (xai-oauth,
     # qwen-oauth, etc.) via the dashboard's model picker — preserve that value
     # so a container restart doesn't revert it to "auto" and break their session.
-    if any(data.get(k) for k in PROVIDER_KEYS):
+    elif any(data.get(k) for k in PROVIDER_KEYS):
         merged_model["provider"] = "auto"
     merged["model"] = merged_model
 

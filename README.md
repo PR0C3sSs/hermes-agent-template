@@ -67,12 +67,15 @@ Message your Telegram bot. If you're a new user, a pairing request will appear i
 | `ADMIN_USERNAME` | `admin` | Basic auth username |
 | `ADMIN_PASSWORD` | *(auto-generated)* | Basic auth password — if unset, a random password is printed to logs |
 | `HERMES_REF` | *(pinned in Dockerfile)* | Hermes Agent version to install (any upstream git tag/branch). Set this to override the Dockerfile default without editing code — see [Updating Hermes](#updating-hermes). |
+| `CLAUDE_CODE_VERSION` | `2.1.201` | Claude Code CLI version baked into the image for the `claude-code-cli` provider. |
+| `LLM_PROVIDER` | *(empty)* | Optional explicit Hermes provider override, e.g. `claude-code-cli`. |
+| `HERMES_CLAUDE_CODE_COMMAND` | `/usr/bin/claude` | Path used by Hermes's Claude Code CLI provider. |
 
 All other configuration (LLM provider, model, channels, tools) is managed through the admin dashboard.
 
 ## Supported Providers
 
-OpenRouter, DeepSeek, DashScope, GLM / Z.AI, Kimi, MiniMax, HuggingFace
+OpenRouter, DeepSeek, DashScope, GLM / Z.AI, Kimi, MiniMax, HuggingFace, Claude Code CLI
 
 ## Supported Channels
 
