@@ -61,6 +61,29 @@ RUN git clone --depth 1 --branch ${HERMES_REF} https://github.com/NousResearch/h
     npm run build && \
     rm -rf /opt/hermes-agent/web /opt/hermes-agent/.git /root/.npm
 
+# Apply the Claude Code CLI provider overlay. Upstream Hermes releases may not
+# yet include this local subprocess-backed provider, so keep the overlay in the
+# immutable image instead of relying on hand-patching /opt at runtime. The overlay
+# also fixes two provider edge cases: async auxiliary callers need an awaitable
+# wrapper around the synchronous CLI facade, and Claude Code's own Grep/Glob/MCP
+# tools must not leak into the subprocess because Hermes owns tool execution.
+COPY patches/claude-code-cli/ /app/patches/claude-code-cli/
+RUN HERMES_CLAUDE_CODE_CLI_ENABLE=0 \
+    HERMES_AGENT_ROOT=/opt/hermes-agent \
+    python /app/patches/claude-code-cli/apply.py && \
+    python -m py_compile \
+        /opt/hermes-agent/agent/claude_code_cli_client.py \
+        /opt/hermes-agent/agent/auxiliary_client.py \
+        /opt/hermes-agent/agent/agent_runtime_helpers.py \
+        /opt/hermes-agent/agent/agent_init.py \
+        /opt/hermes-agent/agent/model_metadata.py \
+        /opt/hermes-agent/hermes_cli/auth.py \
+        /opt/hermes-agent/hermes_cli/runtime_provider.py \
+        /opt/hermes-agent/hermes_cli/providers.py \
+        /opt/hermes-agent/hermes_cli/models.py \
+        /opt/hermes-agent/hermes_cli/model_switch.py \
+        /opt/hermes-agent/hermes_cli/model_normalize.py
+
 # Why pre-build ui-tui (and why we don't delete it after):
 # - The dashboard's embedded Chat tab spawns `node ui-tui/dist/entry.js`
 #   on every WebSocket connect to /api/pty.
