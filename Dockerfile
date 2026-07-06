@@ -27,6 +27,17 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
+# Claude Code CLI is used by Hermes's `claude-code-cli` provider. Install it
+# into the immutable image so Railway redeploys do not lose the `claude`
+# executable from /usr/bin. The login/session files still live under the
+# persistent /data volume via HOME/HERMES_HOME below.
+ARG CLAUDE_CODE_VERSION=2.1.201
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && \
+    if [ "$(command -v claude)" != "/usr/bin/claude" ]; then \
+        ln -sf "$(command -v claude)" /usr/bin/claude; \
+    fi && \
+    claude --version
+
 # Install hermes-agent (provides the `hermes` CLI) and pre-build its React
 # dashboard so `hermes dashboard` has nothing to build at runtime.
 #
@@ -74,6 +85,7 @@ RUN chmod +x /app/start.sh
 
 ENV HOME=/data
 ENV HERMES_HOME=/data/.hermes
+ENV HERMES_CLAUDE_CODE_COMMAND=/usr/bin/claude
 
 # Points hermes at our pre-built TUI bundle. hermes's _make_tui_argv checks
 # HERMES_TUI_DIR first: if dist/entry.js exists there, it skips the npm
